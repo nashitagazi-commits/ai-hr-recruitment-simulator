@@ -2,6 +2,7 @@ import { Fragment, useEffect, useState } from "react"
 import { getMyJobs } from "../Services/jobs"
 import { getCandidates, getInterviewTranscript, setDecision } from "../Services/recruiter"
 import { getErrorMessage } from "../Services/api"
+import { updateJob, deleteJob } from "../Services/jobManage"
 
 const show = (n) => (n === null || n === undefined ? "-" : Math.round(n))
 
@@ -113,6 +114,87 @@ function CandidateDetail({ c, onDecided }) {
   )
 }
 
+const ROLE_TYPES = ["Full-time", "Part-time", "Internship", "Contract"]
+const splitList = (text) => text.split(",").map((x) => x.trim()).filter(Boolean)
+
+function JobEditModal({ job, onClose, onSaved }) {
+  const [form, setForm] = useState({
+    title: job.title || "",
+    company: job.company || "",
+    location: job.location || "",
+    role_type: job.role_type || "Full-time",
+    skills: (job.skills || []).join(", "),
+    requirements: (job.requirements || []).join(", "),
+    description: job.description || "",
+  })
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState("")
+  const set = (key) => (e) => setForm({ ...form, [key]: e.target.value })
+  const input = "mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-blue-500 focus:outline-none"
+
+  const save = async (e) => {
+    e.preventDefault()
+    if (!form.title.trim() || !form.company.trim() || !form.description.trim()) {
+      setError("Title, company and description are required.")
+      return
+    }
+    setSaving(true)
+    setError("")
+    try {
+      const saved = await updateJob(job.id, {
+        title: form.title.trim(),
+        company: form.company.trim(),
+        location: form.location.trim() || "Remote",
+        role_type: form.role_type,
+        description: form.description.trim(),
+        requirements: splitList(form.requirements),
+        skills: splitList(form.skills).map((x) => x.toLowerCase()),
+      })
+      onSaved(saved)
+    } catch (err) {
+      setError(getErrorMessage(err))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <form onSubmit={save} className="max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-xl bg-white p-6 shadow-xl">
+        <h2 className="text-xl font-bold text-gray-800">Edit job</h2>
+        {error && <p role="alert" className="mt-3 rounded-lg bg-red-50 p-3 text-sm text-red-600">{error}</p>}
+
+        <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <label className="text-sm font-medium text-gray-700">Job title *<input className={input} value={form.title} onChange={set("title")} /></label>
+          <label className="text-sm font-medium text-gray-700">Company *<input className={input} value={form.company} onChange={set("company")} /></label>
+          <label className="text-sm font-medium text-gray-700">Location<input className={input} value={form.location} onChange={set("location")} /></label>
+          <label className="text-sm font-medium text-gray-700">Role type
+            <select className={input} value={form.role_type} onChange={set("role_type")}>
+              {ROLE_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </label>
+        </div>
+        <label className="mt-4 block text-sm font-medium text-gray-700">Skills required (comma separated)
+          <input className={input} value={form.skills} onChange={set("skills")} />
+        </label>
+        <label className="mt-4 block text-sm font-medium text-gray-700">Requirements (comma separated)
+          <input className={input} value={form.requirements} onChange={set("requirements")} />
+        </label>
+        <label className="mt-4 block text-sm font-medium text-gray-700">Job description *
+          <textarea rows={5} className={input} value={form.description} onChange={set("description")} />
+        </label>
+
+        <div className="mt-6 flex justify-end gap-3">
+          <button type="button" onClick={onClose} className="rounded-lg border border-gray-300 px-4 py-2 font-semibold text-gray-700 hover:bg-gray-50">Cancel</button>
+          <button type="submit" disabled={saving} className="rounded-lg bg-blue-600 px-5 py-2 font-semibold text-white hover:bg-blue-700 disabled:opacity-60">
+            {saving ? "Saving..." : "Save changes"}
+          </button>
+        </div>
+      </form>
+    </div>
+  )
+}
+
 function Ranking() {
   const [jobs, setJobs] = useState([])
   const [jobId, setJobId] = useState("")
@@ -126,6 +208,9 @@ function Ranking() {
   const [expandedId, setExpandedId] = useState(null)
   const [compareMode, setCompareMode] = useState(false)
   const [selectedForCompare, setSelectedForCompare] = useState([])
+  const [editingJob, setEditingJob] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [jobMsg, setJobMsg] = useState("")
 
   // 1) load the recruiter's jobs
   useEffect(() => {
@@ -215,6 +300,46 @@ function Ranking() {
     URL.revokeObjectURL(url)
   }
 
+  const selectedJob = jobs.find((j) => String(j.id) === String(jobId))
+
+  const handleJobSaved = (saved) => {
+    setJobs((prev) => prev.map((j) => (j.id === saved.id ? saved : j)))
+    setEditingJob(false)
+    setJobMsg("Job updated.")
+  }
+
+  const handleDeleteJob = async () => {
+    if (!selectedJob || deleting) return
+    if (!window.confirm(`Delete "${selectedJob.title}"? This cannot be undone.`)) return
+    setDeleting(true)
+    setError("")
+    setJobMsg("")
+    try {
+      let force = false
+      try {
+        await deleteJob(selectedJob.id)
+      } catch (err) {
+        if (err.response?.status === 409) {
+          if (!window.confirm(`${getErrorMessage(err)}\n\nDelete anyway?`)) return
+          force = true
+          await deleteJob(selectedJob.id, true)
+        } else {
+          throw err
+        }
+      }
+      const remaining = jobs.filter((j) => j.id !== selectedJob.id)
+      setJobs(remaining)
+      setCandidates([])
+      setJobId(remaining.length ? String(remaining[0].id) : "")
+      if (!remaining.length) setLoading(false)
+      setJobMsg(force ? "Job and its applications were deleted." : "Job deleted.")
+    } catch (err) {
+      setError(getErrorMessage(err))
+    } finally {
+      setDeleting(false)
+    }
+  }
+
   const compareList = candidates.filter((c) => selectedForCompare.includes(c.id))
   const colCount = compareMode ? 6 : 5
 
@@ -227,6 +352,26 @@ function Ranking() {
         {error && (
           <div role="alert" className="mt-4 rounded-lg bg-red-50 p-3 text-sm text-red-600">
             {error}
+          </div>
+        )}
+
+        {jobMsg && <p role="status" className="mt-4 rounded-lg bg-green-50 p-3 text-sm text-green-700">{jobMsg}</p>}
+
+        {/* MANAGE SELECTED JOB */}
+        {selectedJob && (
+          <div className="mt-6 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-white p-4 shadow">
+            <div>
+              <p className="text-xs uppercase tracking-wide text-gray-400">Selected job</p>
+              <p className="font-semibold text-gray-800">{selectedJob.title} <span className="font-normal text-gray-500">- {selectedJob.company}, {selectedJob.location}</span></p>
+            </div>
+            <div className="flex gap-3">
+              <button type="button" onClick={() => setEditingJob(true)} className="rounded-lg bg-gray-200 px-4 py-2 font-semibold text-gray-700 hover:bg-gray-300">
+                Edit job
+              </button>
+              <button type="button" onClick={handleDeleteJob} disabled={deleting} className="rounded-lg bg-red-600 px-4 py-2 font-semibold text-white hover:bg-red-700 disabled:opacity-60">
+                {deleting ? "Deleting..." : "Delete job"}
+              </button>
+            </div>
           </div>
         )}
 
@@ -381,6 +526,9 @@ function Ranking() {
           )}
         </div>
       </div>
+      {editingJob && selectedJob && (
+        <JobEditModal job={selectedJob} onClose={() => setEditingJob(false)} onSaved={handleJobSaved} />
+      )}
     </div>
   )
 }
