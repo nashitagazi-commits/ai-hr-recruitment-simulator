@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from ..deps import get_db, get_current_user, candidate_only, recruiter_only
-from ..models import User, Job, Application, Resume, Notification
+from ..models import User, Job, Application, Resume, Notification, InterviewSession, InterviewMessage
 from ..schemas import JobIn
 from ..services import ai
 from .resume import latest
@@ -81,3 +81,36 @@ def apply(job_id: int, user: User = Depends(candidate_only), db: Session = Depen
     db.add(Notification(user_id=j.recruiter_id, message=f"{user.name} applied for {j.title}"))
     db.commit(); db.refresh(a)
     return {"application_id": a.id, "match_percent": a.match_score, "status": a.status}
+
+
+@router.put("/{job_id}")
+def update_job(job_id: int, data: JobIn, user: User = Depends(recruiter_only), db: Session = Depends(get_db)):
+    j = db.get(Job, job_id)
+    if not j or j.recruiter_id != user.id:
+        raise HTTPException(404, "Job not found")
+    for key, value in data.model_dump().items():
+        setattr(j, key, value)
+    db.commit()
+    db.refresh(j)
+    return job_out(j)
+
+
+@router.delete("/{job_id}")
+def delete_job(job_id: int, force: bool = False, user: User = Depends(recruiter_only), db: Session = Depends(get_db)):
+    j = db.get(Job, job_id)
+    if not j or j.recruiter_id != user.id:
+        raise HTTPException(404, "Job not found")
+    apps = db.query(Application).filter(Application.job_id == job_id).all()
+    if apps and not force:
+        raise HTTPException(409, f"{len(apps)} candidate(s) have applied to this job. Deleting it also removes their applications and interviews.")
+    for a in apps:
+        s = db.query(InterviewSession).filter_by(application_id=a.id).first()
+        if s:
+            db.query(InterviewMessage).filter_by(session_id=s.id).delete()
+            db.delete(s)
+        db.add(Notification(user_id=a.candidate_id, message=f"The position {j.title} at {j.company} is no longer available"))
+        db.delete(a)
+    db.delete(j)
+    db.commit()
+    return {"message": "Job deleted", "removed_applications": len(apps)}
+
